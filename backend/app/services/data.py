@@ -1,0 +1,264 @@
+"""
+LlamaIndex RAG engine for the AI-RAG backend.
+
+Provides a full LlamaIndex pipeline:
+  - PostgreSQLRetriever  — custom BaseRetriever backed by pgvector similarity search
+  - configure_llama_settings() — wires OpenAI embed model + LLM into LlamaIndex globals
+  - build_query_engine()       — one-shot (non-streaming) RetrieverQueryEngine
+  - astream_rag_response()     — async generator for streaming RAG responses
+
+The rag_service module calls astream_rag_response() and wraps events in SSE format.
+"""
+
+import logging
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
+from llama_index.core import PromptTemplate, Settings
+from llama_index.core.base.base_retriever import BaseRetriever
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import ResponseMode, get_response_synthesizer
+from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
+
+from app.core.config import get_settings
+from app.core.db import ensure_pool as get_pool
+from app.services.embedding_service import embed_query
+
+logger = logging.getLogger(__name__)
+_settings = get_settings()
+
+
+# ── LlamaIndex global settings ────────────────────────────────────────────────
+
+def configure_llama_settings() -> None:
+    """Wire OpenAI embedding model and LLM into LlamaIndex global Settings."""
+    Settings.embed_model = OpenAIEmbedding(
+        model=_settings.EMBEDDING_MODEL,
+        api_key=_settings.OPENAI_API_KEY,
+        dimensions=_settings.EMBEDDING_DIMENSIONS,
+    )
+    Settings.llm = OpenAI(
+        model=_settings.LLM_MODEL,
+        api_key=_settings.OPENAI_API_KEY,
+        temperature=0.2,
+        max_tokens=2048,
+    )
+
+
+# ── Custom PostgreSQL Retriever ───────────────────────────────────────────────
+
+class PostgreSQLRetriever(BaseRetriever):
+    """
+    LlamaIndex BaseRetriever backed by PostgreSQL + pgvector.
+
+    Runs a cosine similarity search directly against the chunks table
+    and returns results as LlamaIndex NodeWithScore objects.
+    """
+
+    _SQL = """
+        SELECT
+            c.id,
+            c.document_id,
+            d.name          AS document_name,
+            c.content,
+            c.metadata,
+            c.chunk_index,
+            1 - (c.embedding <=> $1::vector) AS similarity
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE
+            d.status = 'ready'
+            AND 1 - (c.embedding <=> $1::vector) > $2
+        ORDER BY c.embedding <=> $1::vector
+        LIMIT $3
+    """
+
+    def __init__(self, top_k: int, threshold: float) -> None:
+        self._top_k = top_k
+        self._threshold = threshold
+        super().__init__()
+
+    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        raise NotImplementedError("Use async retrieval via _aretrieve.")
+
+    async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        embedding = await embed_query(query_bundle.query_str)
+        vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                self._SQL,
+                vec_str,
+                self._threshold,
+                self._top_k,
+            )
+
+        logger.info("PostgreSQLRetriever: retrieved %d chunk(s)", len(rows))
+
+        nodes: List[NodeWithScore] = []
+        for row in rows:
+            text_node = TextNode(
+                text=row["content"],
+                id_=str(row["id"]),
+                metadata={
+                    "document_id": str(row["document_id"]),
+                    "document_name": row["document_name"],
+                    "chunk_index": row["chunk_index"],
+                },
+            )
+            nodes.append(NodeWithScore(node=text_node, score=float(row["similarity"])))
+
+        return nodes
+
+
+# ── QA prompt template ────────────────────────────────────────────────────────
+
+_QA_PROMPT = PromptTemplate(
+    "You are a helpful AI assistant. Answer the user's question based ONLY on the provided context.\n"
+    "If the context doesn't contain enough information to answer, say so clearly.\n"
+    "Always be concise, accurate, and cite relevant parts of the context when useful.\n\n"
+    "Context information:\n"
+    "---------------------\n"
+    "{context_str}\n"
+    "---------------------\n\n"
+    "Query: {query_str}\n"
+    "Answer: "
+)
+
+
+# ── One-shot query engine ─────────────────────────────────────────────────────
+
+def build_query_engine(
+    top_k: Optional[int] = None,
+    threshold: Optional[float] = None,
+) -> RetrieverQueryEngine:
+    """
+    Build a LlamaIndex RetrieverQueryEngine backed by PostgreSQLRetriever.
+
+    Suitable for one-shot (non-streaming) Q&A.
+    For streaming chat, use astream_rag_response() instead.
+    """
+    configure_llama_settings()
+
+    retriever = PostgreSQLRetriever(
+        top_k=top_k or _settings.TOP_K,
+        threshold=threshold or _settings.SIMILARITY_THRESHOLD,
+    )
+    synthesizer = get_response_synthesizer(response_mode=ResponseMode.COMPACT)
+    synthesizer.update_prompts({"text_qa_template": _QA_PROMPT})
+
+    return RetrieverQueryEngine(retriever=retriever, response_synthesizer=synthesizer)
+
+
+# ── Streaming RAG pipeline ────────────────────────────────────────────────────
+
+_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. Answer the user's question based ONLY on the provided context.\n"
+    "If the context doesn't contain enough information to answer the question, say so clearly.\n"
+    "Always be concise, accurate, and cite relevant parts of the context when useful."
+)
+
+
+def _build_context(nodes: List[NodeWithScore]) -> str:
+    sections = []
+    for i, nws in enumerate(nodes, 1):
+        doc_name = nws.node.metadata.get("document_name", "Unknown")
+        score = nws.score or 0.0
+        sections.append(
+            f"[Source {i} — {doc_name} (relevance: {score:.0%})]\n"
+            f"{nws.node.get_content()}"
+        )
+    return "\n\n---\n\n".join(sections)
+
+
+async def astream_rag_response(
+    query: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    top_k: Optional[int] = None,
+    threshold: Optional[float] = None,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Full streaming RAG pipeline using LlamaIndex + PostgreSQL.
+
+    Yields structured event dicts (the caller wraps these in SSE format):
+        {"type": "sources", "data": [<source>, ...]}
+        {"type": "token",   "data": "<text fragment>"}
+        {"type": "done",    "data": ""}
+        {"type": "error",   "data": "<error message>"}
+    """
+    configure_llama_settings()
+
+    # ── Step 1: Retrieve relevant chunks ─────────────────────────────────────
+    retriever = PostgreSQLRetriever(
+        top_k=top_k or _settings.TOP_K,
+        threshold=threshold or _settings.SIMILARITY_THRESHOLD,
+    )
+    try:
+        nodes = await retriever._aretrieve(QueryBundle(query_str=query))
+    except Exception as exc:
+        logger.error("Retrieval failed: %s", exc)
+        yield {"type": "error", "data": f"Database error: {exc}"}
+        return
+
+    # ── Step 2: Emit source metadata ─────────────────────────────────────────
+    sources = [
+        {
+            "document_id": nws.node.metadata.get("document_id", ""),
+            "document_name": nws.node.metadata.get("document_name", ""),
+            "content": (
+                nws.node.get_content()[:300]
+                + ("…" if len(nws.node.get_content()) > 300 else "")
+            ),
+            "similarity": round(nws.score or 0.0, 4),
+            "chunk_index": nws.node.metadata.get("chunk_index", 0),
+        }
+        for nws in nodes
+    ]
+    yield {"type": "sources", "data": sources}
+
+    # ── Step 3: No-context fallback ───────────────────────────────────────────
+    if not nodes:
+        yield {
+            "type": "token",
+            "data": (
+                "I couldn't find relevant information in the uploaded documents to answer your question. "
+                "Please make sure you've uploaded documents containing the relevant information, "
+                "or rephrase your question."
+            ),
+        }
+        yield {"type": "done", "data": ""}
+        return
+
+    # ── Step 4: Build LlamaIndex ChatMessage list ─────────────────────────────
+    context = _build_context(nodes)
+
+    messages: List[ChatMessage] = [
+        ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=f"{_SYSTEM_PROMPT}\n\nContext:\n{context}",
+        )
+    ]
+
+    for turn in (conversation_history or [])[-6:]:
+        role = MessageRole.USER if turn["role"] == "user" else MessageRole.ASSISTANT
+        messages.append(ChatMessage(role=role, content=turn["content"]))
+
+    messages.append(ChatMessage(role=MessageRole.USER, content=query))
+
+    # ── Step 5: Stream LLM response via LlamaIndex OpenAI LLM ────────────────
+    llm: OpenAI = Settings.llm  # type: ignore[assignment]
+
+    try:
+        response_gen = await llm.astream_chat(messages)
+        async for token in response_gen:
+            if token.delta:
+                yield {"type": "token", "data": token.delta}
+    except Exception as exc:
+        logger.error("LlamaIndex LLM streaming error: %s", exc)
+        yield {"type": "error", "data": str(exc)}
+        return
+
+    yield {"type": "done", "data": ""}

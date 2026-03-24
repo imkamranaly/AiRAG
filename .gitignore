@@ -1,6 +1,6 @@
 #front end react
 node_modules/
-.next
+frontend/.next
 dist/
 logs/
 package-lock.json

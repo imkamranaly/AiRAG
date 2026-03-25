@@ -5,6 +5,7 @@ dist/
 logs/
 package-lock.json
 .idea/*
+.next/
 # vscode
 .vscode/
 .env

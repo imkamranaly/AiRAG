@@ -1,7 +1,7 @@
 "use client";
 
 import React, { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -52,11 +52,11 @@ function SourcesPanel({ sources }: { sources: SourceChunk[] }) {
   );
 }
 
-const CodeBlock = memo(function CodeBlock({
+const CodeBlock: NonNullable<Components["code"]> = memo(function CodeBlock({
   className,
   children,
   ...props
-}: React.HTMLAttributes<HTMLElement> & { className?: string }) {
+}) {
   const match = /language-(\w+)/.exec(className || "");
   const language = match ? match[1] : "text";
   const code = String(children).replace(/\n$/, "");
@@ -132,7 +132,7 @@ function ChatMessage({ message }: ChatMessageProps) {
             >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                components={{ code: CodeBlock as React.ElementType }}
+                components={{ code: CodeBlock }}
               >
                 {message.content}
               </ReactMarkdown>

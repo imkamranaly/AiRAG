@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # App
     APP_ENV: str = "development"
-    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: List[str] = ["http://127.0.0.1:8000"]
 
     # RAG
     CHUNK_SIZE: int = 1024

@@ -1,12 +1,10 @@
 -- ============================================================
 -- RAG App — PostgreSQL Schema
--- Requires: pgvector extension (docker image: pgvector/pgvector:pg16)
+-- Chunks are stored in OpenSearch; this schema covers relational data only.
 --
 -- Run once against your database:
 --   psql $DATABASE_URL -f infra/schema.sql
 -- ============================================================
-
-CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ── Shared trigger function ───────────────────────────────────────────────────
 
@@ -35,26 +33,6 @@ CREATE TRIGGER documents_updated_at
     BEFORE UPDATE ON documents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- ── Chunks (with pgvector embeddings) ────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS chunks (
-    id           UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    document_id  UUID    NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    content      TEXT    NOT NULL,
-    embedding    vector(1536),       -- OpenAI text-embedding-3-small
-    chunk_index  INTEGER NOT NULL,
-    metadata     JSONB   NOT NULL DEFAULT '{}',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- IVFFlat index for fast approximate nearest-neighbour search.
--- Tune `lists` to roughly sqrt(total_rows).
-CREATE INDEX IF NOT EXISTS chunks_embedding_idx
-    ON chunks USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
-
-CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks(document_id);
-
 -- ── Chats ─────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS chats (
@@ -80,3 +58,20 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS messages_chat_id_idx ON messages(chat_id);
+
+-- ── Users ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         VARCHAR(320) NOT NULL UNIQUE,
+    password_hash TEXT         NOT NULL,
+    full_name     VARCHAR(255) NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER users_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE INDEX IF NOT EXISTS users_email_idx ON users(email);

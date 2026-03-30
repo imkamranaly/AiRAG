@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.db import close_pool, init_pool
-from app.routes import chat, history, upload
+from app.core.opensearch import close_client, init_client
+from app.routes import auth, chat, history, upload
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,8 +25,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("PostgreSQL connection failed at startup: %s", exc)
         logger.warning("Server will start, but DB-dependent endpoints will return 503 until PostgreSQL is reachable.")
+    try:
+        await init_client()
+    except Exception as exc:
+        logger.error("OpenSearch connection failed at startup: %s", exc)
+        logger.warning("Server will start, but vector search endpoints will fail until OpenSearch is reachable.")
     yield
     await close_pool()
+    await close_client()
     logger.info("RAG API shutting down.")
 
 
@@ -46,6 +53,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
 app.include_router(upload.router, prefix="/api/v1", tags=["Documents"])
 app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
 app.include_router(history.router, prefix="/api/v1", tags=["History"])

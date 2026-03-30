@@ -1,0 +1,32 @@
+# Development overrides — automatically merged by `docker compose up`
+# Mounts local code as volumes so changes are live without rebuilding.
+# Rebuild is only needed when requirements.txt or package.json changes.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend/app:/app/app          # live code reload
+    environment:
+      APP_ENV: development
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev        # lightweight dev image (see below)
+    volumes:
+      - ./frontend:/app                 # live code
+      - /app/node_modules               # keep container's node_modules
+      - /app/.next                      # keep Next.js build cache
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NODE_ENV: development
+    command: npm run dev

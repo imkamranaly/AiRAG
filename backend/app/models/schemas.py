@@ -89,3 +89,29 @@ class CreateChatRequest(BaseModel):
 
 class UpdateChatRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
+
+
+# ── Auth schemas ───────────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=320)
+    password: str = Field(..., min_length=8)
+    full_name: str = Field(..., min_length=1, max_length=255)
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    email: str
+    full_name: str
+    created_at: datetime
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=320)
+    password: str = Field(..., min_length=1)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse

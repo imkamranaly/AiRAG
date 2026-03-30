@@ -1,5 +1,4 @@
 import io
-import json
 import logging
 import uuid
 from pathlib import Path
@@ -9,15 +8,12 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.config import get_settings
 from app.core.db import ensure_pool as get_pool
+from app.core.opensearch import get_os_client
 from app.services.embedding_service import embed_texts
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
-def _vec(embedding: List[float]) -> str:
-    """Serialise a float list to a PostgreSQL vector literal: '[0.1,0.2,...]'."""
-    return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
 def _parse_pdf(content: bytes) -> str:
@@ -126,25 +122,32 @@ async def process_document(
     # 3. Embed all chunks in one batched call
     embeddings = await embed_texts(chunks)
 
-    # 4. Persist chunks + mark document ready
+    # 4. Index chunks into OpenSearch
+    client = get_os_client()
+    os_settings = get_settings()
+    bulk_body: List[Any] = []
+    for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        chunk_id = str(uuid.uuid4())
+        bulk_body.append(
+            {"index": {"_index": os_settings.OPENSEARCH_INDEX_CHUNKS, "_id": chunk_id}}
+        )
+        bulk_body.append(
+            {
+                "id": chunk_id,
+                "document_id": document_id,
+                "document_name": filename,
+                "content": chunk,
+                "embedding": embedding,
+                "chunk_index": idx,
+                "metadata": {"filename": filename, "char_count": len(chunk)},
+            }
+        )
+    await client.bulk(body=bulk_body, refresh=True)
+    logger.info("[doc:%s] Indexed %d chunks into OpenSearch", document_id, len(chunks))
+
+    # 5. Mark document ready in PostgreSQL
     pool = await get_pool()
     async with pool.acquire() as conn:
-        chunk_rows = [
-            (
-                str(uuid.uuid4()),
-                document_id,
-                chunk,
-                _vec(embedding),
-                idx,
-                {"filename": filename, "char_count": len(chunk)},
-            )
-            for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-        ]
-        await conn.executemany(
-            """INSERT INTO chunks (id, document_id, content, embedding, chunk_index, metadata)
-               VALUES ($1, $2, $3, $4::vector, $5, $6)""",
-            chunk_rows,
-        )
         await conn.execute(
             """UPDATE documents
                SET status = 'ready', metadata = $1
@@ -184,7 +187,16 @@ async def get_documents(limit: int = 50, offset: int = 0) -> List[Dict]:
 
 
 async def delete_document(document_id: str) -> None:
+    # Delete chunks from OpenSearch
+    client = get_os_client()
+    os_settings = get_settings()
+    await client.delete_by_query(
+        index=os_settings.OPENSEARCH_INDEX_CHUNKS,
+        body={"query": {"term": {"document_id": document_id}}},
+        refresh=True,
+    )
+
+    # Delete document record from PostgreSQL
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # chunks deleted via ON DELETE CASCADE
         await conn.execute("DELETE FROM documents WHERE id = $1", document_id)

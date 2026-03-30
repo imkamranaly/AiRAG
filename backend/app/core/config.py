@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # App
     APP_ENV: str = "development"
-    CORS_ORIGINS: List[str] = ["http://127.0.0.1:8000"]
+    CORS_ORIGINS: List[str] = ["*"]
 
     # RAG
     CHUNK_SIZE: int = 1024
@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # File upload
     MAX_FILE_SIZE_MB: int = 50
     ALLOWED_EXTENSIONS: List[str] = [".pdf", ".txt", ".md", ".docx"]
+
+    # OpenSearch
+    OPENSEARCH_URL: str = "http://localhost:9200"
+    OPENSEARCH_INDEX_CHUNKS: str = "rag-chunks"
+
+    # Auth
+    BCRYPT_ROUNDS: int = 12
+    SECRET_KEY: str = "change-me-in-production-use-32-random-chars"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ALGORITHM: str = "HS256"
 
 
 @lru_cache()

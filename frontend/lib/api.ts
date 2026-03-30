@@ -3,10 +3,14 @@ import type {
   ChatListResponse,
   Document,
   DocumentListResponse,
+  LoginRequest,
   OptimisticMessage,
+  RegisterRequest,
   SourceChunk,
   StreamEvent,
+  TokenResponse,
   UploadResponse,
+  UserResponse,
 } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -172,4 +176,20 @@ export async function updateChatTitle(chatId: string, title: string): Promise<Ch
 
 export async function deleteChat(chatId: string): Promise<void> {
   await apiFetch(`/api/v1/history/${chatId}`, { method: "DELETE" });
+}
+
+// ── Auth API ──────────────────────────────────────────────────────────────────
+
+export async function registerUser(data: RegisterRequest): Promise<UserResponse> {
+  return apiFetch<UserResponse>("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function loginUser(data: LoginRequest): Promise<TokenResponse> {
+  return apiFetch<TokenResponse>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
 }

@@ -2,7 +2,7 @@
 LlamaIndex RAG engine for the AI-RAG backend.
 
 Provides a full LlamaIndex pipeline:
-  - PostgreSQLRetriever  — custom BaseRetriever backed by pgvector similarity search
+  - OpenSearchRetriever  — custom BaseRetriever backed by OpenSearch k-NN search
   - configure_llama_settings() — wires OpenAI embed model + LLM into LlamaIndex globals
   - build_query_engine()       — one-shot (non-streaming) RetrieverQueryEngine
   - astream_rag_response()     — async generator for streaming RAG responses
@@ -23,7 +23,8 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 
 from app.core.config import get_settings
-from app.core.db import ensure_pool as get_pool
+from app.core.db import ensure_pool
+from app.core.opensearch import get_os_client
 from app.services.embedding_service import embed_query
 
 logger = logging.getLogger(__name__)
@@ -47,32 +48,14 @@ def configure_llama_settings() -> None:
     )
 
 
-# ── Custom PostgreSQL Retriever ───────────────────────────────────────────────
+# ── OpenSearch Retriever ──────────────────────────────────────────────────────
 
-class PostgreSQLRetriever(BaseRetriever):
+class OpenSearchRetriever(BaseRetriever):
     """
-    LlamaIndex BaseRetriever backed by PostgreSQL + pgvector.
+    LlamaIndex BaseRetriever backed by OpenSearch k-NN vector search.
 
-    Runs a cosine similarity search directly against the chunks table
-    and returns results as LlamaIndex NodeWithScore objects.
-    """
-
-    _SQL = """
-        SELECT
-            c.id,
-            c.document_id,
-            d.name          AS document_name,
-            c.content,
-            c.metadata,
-            c.chunk_index,
-            1 - (c.embedding <=> $1::vector) AS similarity
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        WHERE
-            d.status = 'ready'
-            AND 1 - (c.embedding <=> $1::vector) > $2
-        ORDER BY c.embedding <=> $1::vector
-        LIMIT $3
+    Queries the rag-chunks index with cosinesimil HNSW and filters
+    to documents whose status = 'ready' (resolved via PostgreSQL).
     """
 
     def __init__(self, top_k: int, threshold: float) -> None:
@@ -85,31 +68,60 @@ class PostgreSQLRetriever(BaseRetriever):
 
     async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         embedding = await embed_query(query_bundle.query_str)
-        vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
-        pool = await get_pool()
+        # Resolve ready document IDs from PostgreSQL
+        pool = await ensure_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                self._SQL,
-                vec_str,
-                self._threshold,
-                self._top_k,
-            )
+            rows = await conn.fetch("SELECT id FROM documents WHERE status = 'ready'")
+        ready_doc_ids = [str(r["id"]) for r in rows]
 
-        logger.info("PostgreSQLRetriever: retrieved %d chunk(s)", len(rows))
+        if not ready_doc_ids:
+            logger.info("OpenSearchRetriever: no ready documents found.")
+            return []
+
+        client = get_os_client()
+        # cosinesimil score = 1 + cosine_similarity  →  min_score = 1 + threshold
+        response = await client.search(
+            index=_settings.OPENSEARCH_INDEX_CHUNKS,
+            body={
+                "size": self._top_k,
+                "min_score": 1.0 + self._threshold,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {
+                                "knn": {
+                                    "embedding": {
+                                        "vector": embedding,
+                                        "k": self._top_k,
+                                    }
+                                }
+                            }
+                        ],
+                        "filter": [{"terms": {"document_id": ready_doc_ids}}],
+                    }
+                },
+            },
+        )
+
+        hits = response["hits"]["hits"]
+        logger.info("OpenSearchRetriever: retrieved %d chunk(s)", len(hits))
 
         nodes: List[NodeWithScore] = []
-        for row in rows:
+        for hit in hits:
+            src = hit["_source"]
             text_node = TextNode(
-                text=row["content"],
-                id_=str(row["id"]),
+                text=src["content"],
+                id_=src["id"],
                 metadata={
-                    "document_id": str(row["document_id"]),
-                    "document_name": row["document_name"],
-                    "chunk_index": row["chunk_index"],
+                    "document_id": src["document_id"],
+                    "document_name": src["document_name"],
+                    "chunk_index": src["chunk_index"],
                 },
             )
-            nodes.append(NodeWithScore(node=text_node, score=float(row["similarity"])))
+            # Normalise back to [-1, 1] cosine similarity
+            similarity = float(hit["_score"]) - 1.0
+            nodes.append(NodeWithScore(node=text_node, score=similarity))
 
         return nodes
 
@@ -136,14 +148,14 @@ def build_query_engine(
     threshold: Optional[float] = None,
 ) -> RetrieverQueryEngine:
     """
-    Build a LlamaIndex RetrieverQueryEngine backed by PostgreSQLRetriever.
+    Build a LlamaIndex RetrieverQueryEngine backed by OpenSearchRetriever.
 
     Suitable for one-shot (non-streaming) Q&A.
     For streaming chat, use astream_rag_response() instead.
     """
     configure_llama_settings()
 
-    retriever = PostgreSQLRetriever(
+    retriever = OpenSearchRetriever(
         top_k=top_k or _settings.TOP_K,
         threshold=threshold or _settings.SIMILARITY_THRESHOLD,
     )
@@ -192,7 +204,7 @@ async def astream_rag_response(
     configure_llama_settings()
 
     # ── Step 1: Retrieve relevant chunks ─────────────────────────────────────
-    retriever = PostgreSQLRetriever(
+    retriever = OpenSearchRetriever(
         top_k=top_k or _settings.TOP_K,
         threshold=threshold or _settings.SIMILARITY_THRESHOLD,
     )

@@ -9,8 +9,8 @@ interface ChatInputProps {
   onStop?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
-  placeholder?: string;
-}
+  placeholder?: string ;
+}   
 
 export default function ChatInput({
   onSubmit,

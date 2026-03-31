@@ -53,11 +53,19 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app            # live reload — no rebuild needed for code changes
     environment:
       DATABASE_URL: postgresql://raguser:ragpassword@postgres:5432/ragdb
       OPENSEARCH_URL: http://opensearch:9200
-      APP_ENV: production
+      APP_ENV: development
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,13 +75,19 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      dockerfile: Dockerfile.dev          # lightweight dev image (node:20-alpine + npm ci)
     container_name: airag_frontend
     restart: unless-stopped
     ports:
       - "3000:3000"
+    volumes:
+      - ./frontend:/app                   # live reload — no rebuild needed for code changes
+      - /app/node_modules                 # keep container's node_modules
+      - /app/.next                        # keep Next.js build cache
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NODE_ENV: development
+    command: npm run dev
     depends_on:
       - backend
 

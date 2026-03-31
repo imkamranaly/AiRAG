@@ -70,7 +70,7 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="flex flex-col w-72 min-w-[18rem] border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
+    <aside className="flex flex-col w-72 min-w-[18rem] border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 ">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <h1 className="font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">

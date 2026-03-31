@@ -27,6 +27,7 @@ services:
       - plugins.security.disabled=true
       - bootstrap.memory_lock=true
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=dXDZqqi2aiqs7h2b
     ulimits:
       memlock:
         soft: -1

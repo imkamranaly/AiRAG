@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("OpenSearch connection failed at startup: %s", exc)
         logger.warning("Server will start, but vector search endpoints will fail until OpenSearch is reachable.")
+    try:
+        from app.services.document_service import seed_local_document
+        seed_file = Path(__file__).parent / "services" / "data" / "myInfo.txt"
+        await seed_local_document(filepath=str(seed_file), filename="myInfo.txt")
+    except Exception as exc:
+        logger.error("Failed to seed local document: %s", exc)
     yield
     await close_pool()
     await close_client()

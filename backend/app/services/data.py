@@ -80,12 +80,16 @@ class OpenSearchRetriever(BaseRetriever):
             return []
 
         client = get_os_client()
-        # cosinesimil score = 1 + cosine_similarity  →  min_score = 1 + threshold
+        # OpenSearch nmslib cosinesimil scores are in [0, 1]:
+        #   score = (1 + cosine_similarity) / 2
+        # so min_score threshold = (1 + threshold) / 2
+        # NMSLIB does not support inline knn filters — use post-filter via bool query
+        min_score = (1.0 + self._threshold) / 2.0
         response = await client.search(
             index=_settings.OPENSEARCH_INDEX_CHUNKS,
             body={
                 "size": self._top_k,
-                "min_score": 1.0 + self._threshold,
+                "min_score": min_score,
                 "query": {
                     "bool": {
                         "must": [
@@ -120,7 +124,7 @@ class OpenSearchRetriever(BaseRetriever):
                 },
             )
             # Normalise back to [-1, 1] cosine similarity
-            similarity = float(hit["_score"]) - 1.0
+            similarity = 2.0 * float(hit["_score"]) - 1.0
             nodes.append(NodeWithScore(node=text_node, score=similarity))
 
         return nodes
@@ -173,6 +177,27 @@ _SYSTEM_PROMPT = (
     "Always be concise, accurate, and cite relevant parts of the context when useful."
 )
 
+_CHITCHAT_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant for a document Q&A application. "
+    "Respond naturally to greetings and general conversation. "
+    "You can let the user know you're here to help answer questions about their uploaded documents."
+)
+
+_CHITCHAT_PATTERNS = {
+    "hello", "hi", "hey", "hiya", "howdy", "greetings",
+    "good morning", "good afternoon", "good evening", "good night",
+    "how are you", "how's it going", "what's up", "sup",
+    "thanks", "thank you", "bye", "goodbye", "see you",
+    "ok", "okay", "sure", "great", "nice", "cool",
+    "who are you", "what are you", "what can you do",
+}
+
+
+def _is_chitchat(query: str) -> bool:
+    """Return True if the query is a greeting or simple conversational message."""
+    normalized = query.strip().lower().rstrip("!?.,'\"")
+    return normalized in _CHITCHAT_PATTERNS
+
 
 def _build_context(nodes: List[NodeWithScore]) -> str:
     sections = []
@@ -203,6 +228,28 @@ async def astream_rag_response(
     """
     configure_llama_settings()
 
+    # ── Step 0: Bypass RAG for conversational/chitchat queries ───────────────
+    if _is_chitchat(query):
+        yield {"type": "sources", "data": []}
+        llm: OpenAI = Settings.llm  # type: ignore[assignment]
+        messages: List[ChatMessage] = [
+            ChatMessage(role=MessageRole.SYSTEM, content=_CHITCHAT_SYSTEM_PROMPT),
+        ]
+        for turn in (conversation_history or [])[-6:]:
+            role = MessageRole.USER if turn["role"] == "user" else MessageRole.ASSISTANT
+            messages.append(ChatMessage(role=role, content=turn["content"]))
+        messages.append(ChatMessage(role=MessageRole.USER, content=query))
+        try:
+            response_gen = await llm.astream_chat(messages)
+            async for token in response_gen:
+                if token.delta:
+                    yield {"type": "token", "data": token.delta}
+        except Exception as exc:
+            logger.error("LLM chitchat error: %s", exc)
+            yield {"type": "error", "data": str(exc)}
+        yield {"type": "done", "data": ""}
+        return
+
     # ── Step 1: Retrieve relevant chunks ─────────────────────────────────────
     retriever = OpenSearchRetriever(
         top_k=top_k or _settings.TOP_K,
@@ -231,40 +278,38 @@ async def astream_rag_response(
     ]
     yield {"type": "sources", "data": sources}
 
-    # ── Step 3: No-context fallback ───────────────────────────────────────────
-    if not nodes:
-        yield {
-            "type": "token",
-            "data": (
-                "I couldn't find relevant information in the uploaded documents to answer your question. "
-                "Please make sure you've uploaded documents containing the relevant information, "
-                "or rephrase your question."
-            ),
-        }
-        yield {"type": "done", "data": ""}
-        return
+    # ── Step 3: Build context (empty string if no chunks found) ──────────────
+    context = _build_context(nodes) if nodes else ""
 
     # ── Step 4: Build LlamaIndex ChatMessage list ─────────────────────────────
-    context = _build_context(nodes)
+    if nodes:
+        system_content = f"{_SYSTEM_PROMPT}\n\nContext:\n{context}"
+    else:
+        system_content = (
+            "You are a helpful AI assistant for a document Q&A application. "
+            "No relevant document chunks were found for this query. "
+            "Answer general knowledge questions as best you can. "
+            "If the question seems document-specific, let the user know they may need to upload relevant documents."
+        )
 
-    messages: List[ChatMessage] = [
+    rag_messages: List[ChatMessage] = [
         ChatMessage(
             role=MessageRole.SYSTEM,
-            content=f"{_SYSTEM_PROMPT}\n\nContext:\n{context}",
+            content=system_content,
         )
     ]
 
     for turn in (conversation_history or [])[-6:]:
         role = MessageRole.USER if turn["role"] == "user" else MessageRole.ASSISTANT
-        messages.append(ChatMessage(role=role, content=turn["content"]))
+        rag_messages.append(ChatMessage(role=role, content=turn["content"]))
 
-    messages.append(ChatMessage(role=MessageRole.USER, content=query))
+    rag_messages.append(ChatMessage(role=MessageRole.USER, content=query))
 
     # ── Step 5: Stream LLM response via LlamaIndex OpenAI LLM ────────────────
     llm: OpenAI = Settings.llm  # type: ignore[assignment]
 
     try:
-        response_gen = await llm.astream_chat(messages)
+        response_gen = await llm.astream_chat(rag_messages)
         async for token in response_gen:
             if token.delta:
                 yield {"type": "token", "data": token.delta}

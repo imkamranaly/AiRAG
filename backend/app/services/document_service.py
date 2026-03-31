@@ -186,6 +186,35 @@ async def get_documents(limit: int = 50, offset: int = 0) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+async def seed_local_document(filepath: str, filename: str) -> None:
+    """
+    Index a local file into the RAG pipeline at startup if not already present.
+    Skips silently if a 'ready' document with the same name already exists.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM documents WHERE name = $1 AND status = 'ready'", filename
+        )
+    if existing:
+        logger.info("Seed document '%s' already indexed — skipping.", filename)
+        return
+
+    try:
+        content = Path(filepath).read_bytes()
+    except FileNotFoundError:
+        logger.warning("Seed file not found: %s", filepath)
+        return
+
+    doc_id = await create_document_record(
+        filename=filename,
+        file_size=len(content),
+        file_type=Path(filename).suffix.lstrip("."),
+    )
+    await process_document(content=content, filename=filename, document_id=doc_id)
+    logger.info("Seed document '%s' indexed successfully (id=%s).", filename, doc_id)
+
+
 async def delete_document(document_id: str) -> None:
     # Delete chunks from OpenSearch
     client = get_os_client()

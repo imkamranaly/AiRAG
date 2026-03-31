@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = 1024
     CHUNK_OVERLAP: int = 128
     TOP_K: int = 5
-    SIMILARITY_THRESHOLD: float = 0.5
+    SIMILARITY_THRESHOLD: float = 0.2
 
     # File upload
     MAX_FILE_SIZE_MB: int = 50

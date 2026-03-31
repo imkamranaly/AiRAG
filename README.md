@@ -1,93 +1,144 @@
-# RAG App
+# AiRAG — Document Q&A with RAG
 
-A production-ready Retrieval-Augmented Generation application.
-**Stack:** Next.js 14 · FastAPI · Supabase (pgvector) · LlamaIndex · OpenAI
+A full-stack Retrieval-Augmented Generation chatbot. Upload documents and ask questions — answers are grounded in your content, streamed in real time.
+
+![Stack](https://img.shields.io/badge/FastAPI-0.111-009688?style=flat&logo=fastapi)
+![Stack](https://img.shields.io/badge/Next.js-14-black?style=flat&logo=next.js)
+![Stack](https://img.shields.io/badge/OpenSearch-2.13-003BFF?style=flat&logo=opensearch)
+![Stack](https://img.shields.io/badge/OpenAI-GPT--4o--mini-412991?style=flat&logo=openai)
+![Stack](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker)
+
+---
+
+## Features
+
+- Upload **PDF, DOCX, TXT, MD** files — processed in the background
+- Semantic search via **OpenSearch k-NN** (HNSW vector index)
+- Streaming responses with **Server-Sent Events**
+- Full **chat history** with rename/delete
+- Conversational queries handled naturally (greetings, general questions)
+- One-command setup with **Docker Compose**
+
+---
+
+## Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Frontend | Next.js 14 App Router · TypeScript · Zustand · Tailwind CSS |
+| Backend | FastAPI 0.111 · Python 3.11 · asyncpg · LlamaIndex |
+| Vector DB | OpenSearch 2.13 — HNSW k-NN (nmslib, cosinesimil) |
+| Relational DB | PostgreSQL 16 — documents, chats, messages |
+| LLM | OpenAI GPT-4o-mini |
+| Embeddings | OpenAI text-embedding-3-small (1536 dims) |
+| Infra | Docker Compose |
 
 ---
 
 ## Architecture
 
 ```
-rag-app/
-├── frontend/              # Next.js 14 (App Router) + TypeScript + Tailwind
-├── backend/               # FastAPI + LlamaIndex + OpenAI
+AiRAG/
+├── backend/
+│   ├── app/
+│   │   ├── core/          # config · db (asyncpg) · opensearch client
+│   │   ├── models/        # Pydantic v2 schemas
+│   │   ├── routes/        # upload · chat · history
+│   │   └── services/      # document · rag · embedding · history
+│   └── Dockerfile
+├── frontend/
+│   ├── app/               # Next.js App Router pages
+│   ├── components/        # Chat · Sidebar · Upload
+│   ├── lib/api.ts         # All API calls
+│   └── store/             # Zustand global state
 ├── infra/
-│   ├── docker-compose.yml
-│   └── supabase_schema.sql
-├── .env.example
+│   └── schema.sql         # PostgreSQL schema
+├── docker-compose.yml
 └── Makefile
 ```
 
-### RAG Flow
+---
 
+## RAG Pipeline
+
+**Injection (Upload)**
 ```
-Upload  →  Extract text  →  Chunk (SentenceSplitter)
-        →  Embed (OpenAI text-embedding-3-small)
-        →  Store in Supabase chunks table (pgvector)
+Upload file
+  → Extract text (pypdf / python-docx / plain text)
+  → Chunk with LlamaIndex SentenceSplitter (1024 tokens, 128 overlap)
+  → Embed with text-embedding-3-small (batch)
+  → Bulk index into OpenSearch rag-chunks
+  → Mark document ready in PostgreSQL
+```
 
-Query   →  Embed query
-        →  match_chunks() RPC (cosine similarity)
-        →  Build context from top-k chunks
-        →  Stream GPT response (SSE)
-        →  Save messages to Supabase
+**Retrieval (Chat)**
+```
+User query
+  → Embed query
+  → k-NN search in OpenSearch (top-5, cosine similarity ≥ 0.2)
+  → Filter to ready documents via PostgreSQL metadata
+  → Inject top chunks as context into GPT-4o-mini
+  → Stream response tokens via SSE
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
-- Python 3.11+
-- Node.js 20+
-- A [Supabase](https://supabase.com) project (free tier works)
-- An [OpenAI](https://platform.openai.com) API key
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose)
+- OpenAI API key
 
-### 2. Clone & configure
+### 1. Clone & configure
 
 ```bash
-git clone <repo> && cd rag-app
-cp .env.example .env
-# Edit .env with your Supabase + OpenAI credentials
+git clone https://github.com/imkamranaly/AiRAG.git
+cd AiRAG
 ```
 
-### 3. Set up Supabase schema
+Create `backend/.env`:
+```env
+DATABASE_URL=postgresql://raguser:ragpassword@postgres:5432/ragdb
+OPENSEARCH_URL=http://opensearch:9200
+OPENAI_API_KEY=sk-...
+APP_ENV=production
+CORS_ORIGINS=["*"]
+```
 
-1. Go to **Supabase Dashboard → SQL Editor**
-2. Paste and run the contents of `infra/supabase_schema.sql`
+Create `frontend/.env`:
+```env
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+```
 
-This creates:
-- `documents` — uploaded file metadata
-- `chunks` — text chunks with `vector(1536)` embeddings
-- `chats` — chat sessions
-- `messages` — conversation history
-- `match_chunks()` — pgvector similarity search RPC
-
-### 4. Install dependencies
+### 2. Run with Docker
 
 ```bash
-make install
+docker compose up --build
 ```
 
-### 5. Run locally
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:8000 |
+| API Docs (Swagger) | http://localhost:8000/docs |
+| OpenSearch | http://localhost:9200 |
+
+### 3. Run locally (without Docker)
 
 ```bash
-make dev
+# Terminal 1 — Backend
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+
+# Terminal 2 — Frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-- **Frontend:** http://localhost:3000
-- **Backend API:** http://127.0.0.1:8000
-- **API Docs:** http://127.0.0.1:8000/docs
-
----
-
-## Docker
-
-```bash
-make docker-up    # start all services
-make docker-logs  # tail logs
-make docker-down  # stop
-```
+> PostgreSQL and OpenSearch still need to be running (via Docker or locally).
 
 ---
 
@@ -95,62 +146,61 @@ make docker-down  # stop
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/upload` | Upload a document (background processing) |
+| `POST` | `/api/v1/upload` | Upload a document |
 | `GET` | `/api/v1/documents` | List uploaded documents |
-| `DELETE` | `/api/v1/documents/{id}` | Delete a document + its chunks |
-| `POST` | `/api/v1/chat` | Stream a RAG response (SSE) |
-| `GET` | `/api/v1/history` | List all chat sessions |
-| `POST` | `/api/v1/history` | Create a new chat session |
+| `DELETE` | `/api/v1/documents/{id}` | Delete a document |
+| `POST` | `/api/v1/chat` | Stream RAG response (SSE) |
+| `GET` | `/api/v1/history` | List chat sessions |
+| `POST` | `/api/v1/history` | Create chat session |
 | `GET` | `/api/v1/history/{id}` | Get chat + messages |
-| `PATCH` | `/api/v1/history/{id}` | Rename a chat |
-| `DELETE` | `/api/v1/history/{id}` | Delete a chat |
+| `PATCH` | `/api/v1/history/{id}` | Rename chat |
+| `DELETE` | `/api/v1/history/{id}` | Delete chat |
 
-### Streaming Chat — SSE Event Format
+### SSE Stream Format
 
 ```
-data: {"type": "sources", "data": [{document_name, content, similarity, ...}]}
+data: {"type": "sources", "data": [{"document_name": "...", "content": "...", "similarity": 0.82}]}
 data: {"type": "token",   "data": "Hello"}
 data: {"type": "token",   "data": " world"}
-data: {"type": "done",    "data": {"chat_id": "uuid"}}
-data: {"type": "error",   "data": "Error message"}
+data: {"type": "done",    "data": ""}
+data: {"type": "error",   "data": "..."}
 ```
 
 ---
 
 ## Configuration
 
-All config is via environment variables (see `.env.example`):
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENAI_API_KEY` | — | Required |
-| `SUPABASE_URL` | — | Required |
-| `SUPABASE_SERVICE_KEY` | — | Required (service role) |
+| `DATABASE_URL` | — | PostgreSQL connection string |
+| `OPENSEARCH_URL` | `http://localhost:9200` | OpenSearch endpoint |
 | `LLM_MODEL` | `gpt-4o-mini` | OpenAI chat model |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
 | `CHUNK_SIZE` | `1024` | Tokens per chunk |
 | `CHUNK_OVERLAP` | `128` | Overlap between chunks |
-| `TOP_K` | `5` | Retrieved chunks per query |
-| `SIMILARITY_THRESHOLD` | `0.5` | Minimum cosine similarity |
+| `TOP_K` | `5` | Chunks retrieved per query |
+| `SIMILARITY_THRESHOLD` | `0.2` | Minimum cosine similarity |
 | `MAX_FILE_SIZE_MB` | `50` | Max upload size |
 
 ---
 
-## Testing
+## Makefile Commands
 
 ```bash
-make test-backend   # pytest
-make test-frontend  # jest
+make dev          # Run frontend + backend in parallel
+make docker-up    # docker compose up -d
+make docker-down  # docker compose down
+make test         # pytest + jest
+make lint         # ruff + eslint
 ```
 
 ---
 
-## Extending to Production
+## Built With
 
-1. **Auth** — Add Supabase Auth + RLS policies to scope documents/chats per user
-2. **Rate limiting** — Add `slowapi` middleware to FastAPI
-3. **Observability** — Add structured logging + Sentry
-4. **Hybrid search** — Add full-text search (`tsvector`) alongside vector search
-5. **Reranking** — Add a cross-encoder reranker (e.g. Cohere rerank) after retrieval
-6. **Multi-tenancy** — Partition `documents` + `chunks` by `user_id`
-7. **CDN** — Serve Next.js from Vercel; deploy FastAPI to Railway/Fly.io
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [LlamaIndex](https://www.llamaindex.ai/)
+- [OpenSearch](https://opensearch.org/)
+- [Next.js](https://nextjs.org/)
+- [OpenAI](https://platform.openai.com/)
